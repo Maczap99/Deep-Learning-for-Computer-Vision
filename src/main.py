@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-training = (
+ordner_basis = (
     Path(__file__).resolve().parent.parent
     / "assets"
     / "Fruits-360-Station-1"
