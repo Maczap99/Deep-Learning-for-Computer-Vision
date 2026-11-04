@@ -1,7 +1,5 @@
 from pathlib import Path
 
-obst_liste = ["Apfel", "Birne", "Orange"]
-
 ordner_basis = (
     Path(__file__).resolve().parent.parent
     / "assets"
@@ -11,14 +9,11 @@ ordner_basis = (
 
 bild_endungen = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
 
-for obst in obst_liste:
-	ordner = ordner_basis / obst
-	if not ordner.is_dir():
-		print(f"Der Ordner '{obst}' ist kein gültiger Ordner.")
-	else:
+for ordner in sorted(ordner_basis.iterdir()):
+	if ordner.is_dir():
 		anzahl = sum(
 			1
 			for datei in ordner.iterdir()
 			if datei.is_file() and datei.suffix.lower() in bild_endungen
 		)
-		print(f"Anzahl der Bilder in '{obst}': {anzahl}")
+		print(f"Anzahl der Bilder in '{ordner.name}': {anzahl}")
