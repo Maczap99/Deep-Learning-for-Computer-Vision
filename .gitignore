@@ -220,4 +220,8 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Trainungsdaten
+<<<<<<< HEAD
+Assets/
+=======
 assets/
+>>>>>>> c64fbba48caa5a920d623c4a253dd19b918ecb0e
