@@ -13,7 +13,7 @@ bild_endungen = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".web
 
 gewuenschte_klassen = ["Orange", "Mandarine", "Clementine", "Apfel", "Pfirsich", "Nektarine", "Birne", "Banane"]
 ordner_klassen = [ordner_basis / name for name in gewuenschte_klassen]
-_, flaechen = plt.subplots(1, 8)
+_, flaechen = plt.subplots(1, len(ordner_klassen), figsize=(15, 5))
 
 for flaeche, ordner in zip(flaechen, ordner_klassen):
     bild_dateien = sorted(
