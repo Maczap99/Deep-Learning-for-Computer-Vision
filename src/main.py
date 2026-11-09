@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 ordner_basis = (
     Path(__file__).resolve().parent.parent
-    / "Assets"
+    / "assets"
     / "Fruits-360-Station-1"
     / "Training"
 )
