@@ -19,10 +19,9 @@ flaeche.axis("off")
 
 plt.show()
 
-gewuenschte_klassen = ["Apfel", "Birne", "Orange"]
-training_zeilen = (
-    repo_ordner / "configs" / "training.txt"
-).read_text(encoding="utf-8").splitlines()
+gewuenschte_klassen = ["Orange", "Mandarine", "Clementine", "Apfel", "Pfirsich", "Nektarine", "Birne", "Banane"]
+ordner_klassen = [ordner_basis / name for name in gewuenschte_klassen]
+_, flaechen = plt.subplots(1, len(ordner_klassen), figsize=(15, 5))
 
 for dateiname, zeilen in [
     ("validierung.txt", validierung_zeilen),
