@@ -4,17 +4,16 @@ import matplotlib.pyplot as plt
 
 ordner_basis = (
     Path(__file__).resolve().parent.parent
-    / "assets"
+    / "Assets"
     / "Fruits-360-Station-1"
     / "Training"
 )
 
 bild_endungen = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
 
-ordner_klassen = [
-    ordner for ordner in sorted(ordner_basis.iterdir()) if ordner.is_dir()
-][:3]
-_, flaechen = plt.subplots(1, 3)
+gewuenschte_klassen = ["Apfel", "Birne", "Orange", "Mandarine", "Clementine", "Pfirsich", "Nektarine", "Banane"]
+ordner_klassen = [ordner_basis / name for name in gewuenschte_klassen]
+_, flaechen = plt.subplots(1, 7)
 
 for flaeche, ordner in zip(flaechen, ordner_klassen):
     bild_dateien = sorted(
