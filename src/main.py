@@ -11,9 +11,9 @@ ordner_basis = (
 
 bild_endungen = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
 
-gewuenschte_klassen = ["Apfel", "Birne", "Orange", "Mandarine", "Clementine", "Pfirsich", "Nektarine", "Banane"]
+gewuenschte_klassen = ["Orange", "Mandarine", "Clementine", "Apfel", "Pfirsich", "Nektarine", "Birne", "Banane"]
 ordner_klassen = [ordner_basis / name for name in gewuenschte_klassen]
-_, flaechen = plt.subplots(1, 7)
+_, flaechen = plt.subplots(1, 8)
 
 for flaeche, ordner in zip(flaechen, ordner_klassen):
     bild_dateien = sorted(
