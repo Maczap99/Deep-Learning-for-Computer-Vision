@@ -83,20 +83,32 @@ vorverarbeitung_config = resolve_model_data_config(modell)
 vorverarbeitung = create_transform(**vorverarbeitung_config, is_training=False)
 
 bild_tensoren = []
-for klasse in KLASSEN_ZU_LABELS:
+labels = []
+for klasse, label in KLASSEN_ZU_LABELS.items():
     with Image.open(bildpfade_pro_klasse[klasse]) as bild:
         rgb_bild = bild.convert("RGB")
         bild_tensoren.append(vorverarbeitung(rgb_bild))
+        labels.append(label)
 
 batch = torch.stack(bild_tensoren)
+labels_batch = torch.tensor(labels, dtype=torch.long)
+if len(batch) != len(labels_batch):
+    raise RuntimeError(
+        f"Anzahl Bilder ({len(batch)}) und Labels ({len(labels_batch)}) stimmt nicht überein."
+    )
+
 erwartete_form = (len(KLASSEN_ZU_LABELS), *vorverarbeitung_config["input_size"])
 if tuple(batch.shape) != erwartete_form or erwartete_form != (8, 3, 224, 224):
     raise RuntimeError(
         f"Unerwartete Tensorform {tuple(batch.shape)}; erwartet wird [8, 3, 224, 224]."
     )
 
-with torch.no_grad():
-    logits = modell(batch)
+optimierer = torch.optim.SGD(
+    (parameter for _, parameter in trainierbare_parameter),
+    lr=0.01,
+)
+optimierer.zero_grad(set_to_none=True)
+logits = modell(batch)
 
 erwartete_ausgabeform = (len(KLASSEN_ZU_LABELS), len(KLASSEN_ZU_LABELS))
 if tuple(logits.shape) != erwartete_ausgabeform:
@@ -104,12 +116,34 @@ if tuple(logits.shape) != erwartete_ausgabeform:
         f"Unerwartete Ausgabeform {tuple(logits.shape)}; erwartet wird [8, 8]."
     )
 
-# Test Ausgabe:
-# print(f"Checkpoint: {CHECKPOINT_ID}")
-# print(f"Geladene Revision: {CHECKPOINT_REVISION}")
-# print(f"Eingabegroesse: {vorverarbeitung_config['input_size']}")
-# print(f"Normalisierung: Mittelwert={vorverarbeitung_config['mean']}, "f"Standardabweichung={vorverarbeitung_config['std']}")
-# print(f"Form des Bild-Batches: {list(batch.shape)}")
-# print(f"Trainierbare Parameter: {trainierbare_namen}")
-# print(f"Anzahl trainierbarer Parameter: {anzahl_trainierbarer_parameter}")
-print(f"Form der Modell-Ausgabe: {list(logits.shape)}")
+verlustfunktion = torch.nn.CrossEntropyLoss()
+verlust = verlustfunktion(logits, labels_batch)
+if verlust.ndim != 0 or not torch.isfinite(verlust):
+    raise RuntimeError(f"Ungueltiger Verlust: {verlust}")
+
+verlust.backward()
+if any(parameter.grad is None for _, parameter in trainierbare_parameter):
+    raise RuntimeError("Mindestens ein trainierbarer Kopfparameter hat keinen Gradienten.")
+if any(
+    parameter.grad is not None
+    for parameter in modell.parameters()
+    if not parameter.requires_grad
+):
+    raise RuntimeError("Ein eingefrorener ViT-Parameter hat unerwartet einen Gradienten.")
+
+head_vorher = {
+    name: parameter.detach().clone()
+    for name, parameter in trainierbare_parameter
+}
+optimierer.step()
+head_danach = {
+    name: not torch.equal(head_vorher[name], parameter.detach())
+    for name, parameter in trainierbare_parameter
+}
+if not all(head_danach.values()):
+    raise RuntimeError(f"Nicht alle Headparameter wurden aktualisiert: {head_danach}")
+
+print(f"Linear-Probing-Pilot: Eingabe={tuple(batch.shape)}, ")
+print(f"Ausgabe={tuple(logits.shape)}, Verlust={verlust.item():.4f}, ")
+print(f"trainierbare Parameter={trainierbare_namen} ")
+print(f"({anzahl_trainierbarer_parameter}), Head aktualisiert={all(head_danach.values())}")
