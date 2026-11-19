@@ -16,7 +16,7 @@ SEED = 32427
 batchgroesse = 8
 
 EPOCHEN = 3
-LERNRATEN = (0.001, 0.0001)
+LERNRATEN = (0.01,)
 ERWARTETE_TRAININGSBILDER = 35713
 ERWARTETE_VALIDIERUNGSBILDER = 6309
 
@@ -269,10 +269,6 @@ if __name__ == "__main__":
         laufordner = laufordner_pro_lernrate[lernrate]
         laufordner.mkdir(exist_ok=False)
 
-        bester_validierungsverlust = float("inf")
-        beste_epoche = 0
-        bester_modellzustand = None
-
         for epoche in range(1, EPOCHEN + 1):
             epoche_start = time.perf_counter()
             modell.train()
@@ -404,40 +400,16 @@ if __name__ == "__main__":
                 encoding="utf-8",
             )
 
-            print(f"Epoche: {epoche}")
-            print(f"Lernrate: {lernrate}")
-            print(f"Trainingsverlust: {trainings_verlust:.6f}")
-            print(f"Validierungsverlust: {validierungs_verlust:.6f}")
-            print(f"Treffer: {validierung_richtig}/{validierung_anzahl}")
-            print(f"Trefferquote je Klasse: {validierung_trefferquote_pro_klasse}")
-            print(f"Laufzeit: {laufzeit:.2f} s")
-
-            if validierungs_verlust < bester_validierungsverlust:
-                bester_validierungsverlust = validierungs_verlust
-                beste_epoche = epoche
-                bester_modellzustand = {
-                    name: parameter.detach().cpu().clone()
-                    for name, parameter in modell.state_dict().items()
-                }
-
-        if bester_modellzustand is None:
-            raise RuntimeError(
-                f"Kein gueltiger Checkpoint fuer Lernrate {lernrate} erstellt."
+            print(
+                f"Epoche {epoche} | "
+                f"Lernrate: {lernrate:g} | "
+                f"Trainingsverlust: {trainings_verlust:.6f} | "
+                f"Trainingsgenauigkeit: {trainingstrefferquote:.2%} | "
+                f"Trainingsrichtige Vorhersagen: "
+                f"{training_richtig}/{training_anzahl} | "
+                f"Validierungsverlust: {validierungs_verlust:.6f} | "
+                f"Validierungsgenauigkeit: {validierungstrefferquote:.2%} | "
+                f"Validierungsrichtige Vorhersagen: "
+                f"{validierung_richtig}/{validierung_anzahl} | "
+                f"Laufzeit: {laufzeit:.2f} s"
             )
-
-        torch.save(
-            {
-                "klassen_zu_labels": KLASSEN_ZU_LABELS,
-                "epoche": beste_epoche,
-                "lernrate": lernrate,
-                "seed": SEED,
-                "batchgroesse": batchgroesse,
-                "modell_state_dict": bester_modellzustand,
-                "vorverarbeitung": vorverarbeitung_config,
-                "validierungsverlust": bester_validierungsverlust,
-            },
-            laufordner / "bester_stand.pt",
-        )
-        print(f"Bester Stand fuer Lernrate {lernrate}:")
-        print(f"Epoche {beste_epoche},")
-        print(f"Validierungsverlust {bester_validierungsverlust:.6f}")
