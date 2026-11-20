@@ -10,13 +10,15 @@ from torch.utils.data import DataLoader, Dataset
 
 repo_ordner = Path(__file__).resolve().parent.parent
 
-CHECKPOINT_ID = "vit_base_patch16_224.augreg_in21k_ft_in1k"
+CHECKPOINT_ID = "resnet18.tv_in1k"
 
 SEED = 32427
 batchgroesse = 8
 
-EPOCHEN = 3
-LERNRATEN = (0.01,)
+EPOCHEN = 10
+LERNRATEN = (0.001,)
+# Zusatzversuch vor dem CNN-Kopf (Ergebnisse unter models/Training/cnn_d)
+# CNN_DROPOUT = 0.05
 ERWARTETE_TRAININGSBILDER = 35713
 ERWARTETE_VALIDIERUNGSBILDER = 6309
 
@@ -132,7 +134,7 @@ if len(validierung_bildpfade) != ERWARTETE_VALIDIERUNGSBILDER:
 
 modell_fuer_vorverarbeitung = timm.create_model(
     CHECKPOINT_ID,
-    pretrained=False,
+    pretrained=True,
 )
 vorverarbeitung_config = resolve_model_data_config(
     modell_fuer_vorverarbeitung
@@ -141,7 +143,6 @@ vorverarbeitung = create_transform(
     **vorverarbeitung_config,
     is_training=False,
 )
-del modell_fuer_vorverarbeitung
 
 torch.manual_seed(SEED)
 if torch.cuda.is_available():
@@ -182,20 +183,29 @@ else:
     geraet = torch.device("cpu")
     geraetename = "CPU"
 
-modell = torch.nn.Sequential(
-    torch.nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
-    torch.nn.ReLU(),
-    torch.nn.MaxPool2d(kernel_size=2),
-    torch.nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-    torch.nn.ReLU(),
-    torch.nn.MaxPool2d(kernel_size=2),
-    torch.nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
-    torch.nn.ReLU(),
-    torch.nn.MaxPool2d(kernel_size=2),
-    torch.nn.AdaptiveAvgPool2d(1),
-    torch.nn.Flatten(),
-    torch.nn.Linear(64, len(KLASSEN_ZU_LABELS)),
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
+modell = modell_fuer_vorverarbeitung.to(geraet)
+modell.fc = torch.nn.Linear(
+    modell.fc.in_features,
+    len(KLASSEN_ZU_LABELS),
 ).to(geraet)
+for parameter in modell.parameters():
+    parameter.requires_grad = False
+for parameter in modell.fc.parameters():
+    parameter.requires_grad = True
+trainierbare_parameter = sum(
+    parameter.numel()
+    for parameter in modell.parameters()
+    if parameter.requires_grad
+)
+if trainierbare_parameter != 4104:
+    raise RuntimeError(
+        f"Unerwartete Anzahl trainierbarer Parameter: {trainierbare_parameter}; "
+        "erwartet werden 4104."
+    )
 modell_initialzustand = {
     name: parameter.detach().cpu().clone()
     for name, parameter in modell.state_dict().items()
@@ -265,13 +275,17 @@ if __name__ == "__main__":
             torch.cuda.manual_seed_all(SEED)
 
         modell.load_state_dict(modell_initialzustand)
-        optimierer = torch.optim.AdamW(modell.parameters(), lr=lernrate)
+        optimierer = torch.optim.AdamW(
+            (modell.fc.weight, modell.fc.bias),
+            lr=lernrate,
+        )
         laufordner = laufordner_pro_lernrate[lernrate]
         laufordner.mkdir(exist_ok=False)
 
         for epoche in range(1, EPOCHEN + 1):
             epoche_start = time.perf_counter()
-            modell.train()
+            modell.eval()
+            modell.fc.train()
             trainingsverlust_summe = 0.0
             training_richtig = 0
             training_anzahl = 0
@@ -281,6 +295,15 @@ if __name__ == "__main__":
                 trainings_labels = trainings_labels.to(geraet)
 
                 optimierer.zero_grad(set_to_none=True)
+                # Variante aus dem Dropout-Versuch:
+                # merkmale = modell.forward_features(trainings_bilder)
+                # merkmale = modell.forward_head(merkmale, pre_logits=True)
+                # merkmale = torch.nn.functional.dropout(
+                #     merkmale,
+                #     p=CNN_DROPOUT,
+                #     training=True,
+                # )
+                # logits = modell.fc(merkmale)
                 logits = modell(trainings_bilder)
                 verlust = verlustfunktion(logits, trainings_labels)
                 if not torch.isfinite(verlust):
@@ -359,6 +382,7 @@ if __name__ == "__main__":
                     "klassen_zu_labels": KLASSEN_ZU_LABELS,
                     "epoche": epoche,
                     "lernrate": lernrate,
+                    # "cnn_dropout": CNN_DROPOUT,
                     "seed": SEED,
                     "batchgroesse": batchgroesse,
                     "modell_state_dict": {
@@ -386,6 +410,7 @@ if __name__ == "__main__":
             epoche_ergebnis = (
                 f"Epoche: {epoche}\n"
                 f"Lernrate: {lernrate}\n"
+                # f"CNN-Dropout: {CNN_DROPOUT}\n"
                 f"Trainingsverlust: {trainings_verlust:.6f}\n"
                 f"Trainingsgenauigkeit: {trainingstrefferquote:.2%}\n"
                 f"Trainingsrichtige Vorhersagen: {training_richtig}/{training_anzahl}\n"

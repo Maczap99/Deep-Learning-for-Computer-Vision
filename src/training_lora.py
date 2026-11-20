@@ -15,8 +15,9 @@ CHECKPOINT_ID = "timm/vit_base_patch16_224.augreg_in21k_ft_in1k"
 CHECKPOINT_REVISION = "2ec9fb3d7bb664aac471ac44582c94d18de33780"
 
 SEED = 32427
-ALTER_STAND = "lora/rang_16/epoche_2"
-LERNRATE = 1e-3
+EPOCHEN = 10
+LERNRATEN = (0.0001,)
+ALTER_STAND = ""
 batchgroesse = 8
 
 LORA_RANG = 16
@@ -119,18 +120,12 @@ for bild_index in range(max(map(len, validierungspfade_pro_klasse.values()))):
 
 modell = timm.create_model(
     "vit_base_patch16_224.augreg_in21k_ft_in1k",
-    pretrained=True,
-    pretrained_cfg_overlay={
-        "hf_hub_id": f"{CHECKPOINT_ID}@{CHECKPOINT_REVISION}",
-    },
+    pretrained=False,
 )
-
-torch.manual_seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
-modell.reset_classifier(num_classes=len(KLASSEN_ZU_LABELS))
 vorverarbeitung_config = resolve_model_data_config(modell)
 vorverarbeitung = create_transform(**vorverarbeitung_config, is_training=False)
+del modell
+
 trainings_dataset = BildDataset(bildpfade, labels, vorverarbeitung)
 validierungs_dataset = BildDataset(
     validierung_bildpfade,
@@ -148,19 +143,6 @@ validierungs_dataloader = DataLoader(
     shuffle=False,
 )
 
-anzahl_lora_parameter_pro_rang = sum(
-    modul.in_features + modul.out_features
-    for name, modul in modell.named_modules()
-    if isinstance(modul, torch.nn.Linear)
-    and any(name.endswith(zielmodul) for zielmodul in LORA_ZIELMODULE)
-)
-anzahl_kopfparameter = sum(
-    parameter.numel() for parameter in modell.get_classifier().parameters()
-)
-erwartete_anzahl_trainierbarer_parameter = (
-    LORA_RANG * anzahl_lora_parameter_pro_rang + anzahl_kopfparameter
-)
-
 lora_config = LoraConfig(
     r=LORA_RANG,
     lora_alpha=LORA_ALPHA,
@@ -169,47 +151,6 @@ lora_config = LoraConfig(
     bias="none",
     modules_to_save=["head"]
 )
-
-if ALTER_STAND:
-    alter_standpfad = repo_ordner / "models" / ALTER_STAND
-    if not alter_standpfad.is_dir():
-        raise FileNotFoundError(
-            f"Alter Stand nicht gefunden: {alter_standpfad}"
-        )
-
-    trainingsstandspfad = alter_standpfad / "trainingsstand.pt"
-    if not trainingsstandspfad.is_file():
-        raise FileNotFoundError(
-            f"Trainingsstand nicht gefunden: {trainingsstandspfad}"
-        )
-
-    gespeichert = torch.load(
-        trainingsstandspfad,
-        map_location="cpu",
-        weights_only=True,
-    )
-    if gespeichert["checkpoint_id"] != CHECKPOINT_ID:
-        raise RuntimeError("Checkpoint-ID stimmt nicht mit dem Fortsetzungsstand ueberein.")
-    if gespeichert["checkpoint_revision"] != CHECKPOINT_REVISION:
-        raise RuntimeError("Checkpoint-Revision stimmt nicht mit dem Fortsetzungsstand ueberein.")
-    if gespeichert["lora_rang"] != LORA_RANG:
-        raise RuntimeError("LoRA-Rang stimmt nicht mit dem Fortsetzungsstand ueberein.")
-    if gespeichert["klassen_zu_labels"] != KLASSEN_ZU_LABELS:
-        raise RuntimeError("Klassen-Zuordnung stimmt nicht mit dem Fortsetzungsstand ueberein.")
-
-    print("Geladener Trainingsstand:", trainingsstandspfad)
-
-    modell = PeftModel.from_pretrained(
-        modell,
-        alter_standpfad,
-        is_trainable=True,
-    )
-    epoche = gespeichert["epoche"] + 1
-else:
-    modell = get_peft_model(modell, lora_config)
-    epoche = 1
-
-print("Naechste Epoche:", epoche)
 
 if torch.cuda.is_available():
     geraete_index = next(
@@ -228,202 +169,319 @@ if torch.cuda.is_available():
 else:
     geraet = torch.device("cpu")
     geraetename = "CPU"
-modell = modell.to(geraet)
 print(f"Modellgerät: {geraetename}")
 
-lora_modulnamen = []
-for name, modul in modell.named_modules():
-    if hasattr(modul, "lora_A"):
-        lora_modulnamen.append(name)
+verlustfunktion = torch.nn.CrossEntropyLoss()
 
-print(f"Anzahl LoRA Adaptermodule: {len(lora_modulnamen)}")
-
-if len(lora_modulnamen) != 24:
-    raise RuntimeError(
-        f"Erwartet wurden 24 LoRA Adaptermodule, gefunden wurden {len(lora_modulnamen)}."
+if __name__ == "__main__":
+    ausgabeordner = (
+        repo_ordner
+        / "models"
+        / "lora"
+        / f"rang_{LORA_RANG}"
     )
-if any("patch_embed.proj" in name for name in lora_modulnamen):
-    raise RuntimeError("patch_embed.proj darf keinen LoRA Adapter enthalten.")
+    laufordner_pro_lernrate = {
+        lernrate: ausgabeordner / f"lernrate_{lernrate:g}"
+        for lernrate in LERNRATEN
+    }
+    vorhandene_laufordner = [
+        laufordner
+        for laufordner in laufordner_pro_lernrate.values()
+        if laufordner.exists()
+    ]
+    if vorhandene_laufordner:
+        raise FileExistsError(
+            "Ausgabeordner existieren bereits; Ueberschreiben verhindert: "
+            f"{vorhandene_laufordner}"
+        )
+    ausgabeordner.mkdir(parents=True, exist_ok=True)
 
-for block in range(12):
-    for zielmodul in ("qkv", "proj"):
-        suffix = f"blocks.{block}.attn.{zielmodul}"
-        treffer = [name for name in lora_modulnamen if name.endswith(suffix)]
-        if len(treffer) != 1:
+    for lernrate in LERNRATEN:
+        modell = timm.create_model(
+            "vit_base_patch16_224.augreg_in21k_ft_in1k",
+            pretrained=True,
+            pretrained_cfg_overlay={
+                "hf_hub_id": f"{CHECKPOINT_ID}@{CHECKPOINT_REVISION}",
+            },
+        )
+
+        torch.manual_seed(SEED)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(SEED)
+        modell.reset_classifier(num_classes=len(KLASSEN_ZU_LABELS))
+
+        anzahl_lora_parameter_pro_rang = sum(
+            modul.in_features + modul.out_features
+            for name, modul in modell.named_modules()
+            if isinstance(modul, torch.nn.Linear)
+            and any(name.endswith(zielmodul) for zielmodul in LORA_ZIELMODULE)
+        )
+        anzahl_kopfparameter = sum(
+            parameter.numel()
+            for parameter in modell.get_classifier().parameters()
+        )
+        erwartete_anzahl_trainierbarer_parameter = (
+            LORA_RANG * anzahl_lora_parameter_pro_rang
+            + anzahl_kopfparameter
+        )
+
+        if ALTER_STAND:
+            alter_standpfad = repo_ordner / "models" / ALTER_STAND
+            if not alter_standpfad.is_dir():
+                raise FileNotFoundError(
+                    f"Alter Stand nicht gefunden: {alter_standpfad}"
+                )
+
+            trainingsstandspfad = alter_standpfad / "trainingsstand.pt"
+            if not trainingsstandspfad.is_file():
+                raise FileNotFoundError(
+                    f"Trainingsstand nicht gefunden: {trainingsstandspfad}"
+                )
+
+            gespeichert = torch.load(
+                trainingsstandspfad,
+                map_location="cpu",
+                weights_only=True,
+            )
+            if gespeichert["checkpoint_id"] != CHECKPOINT_ID:
+                raise RuntimeError(
+                    "Checkpoint-ID stimmt nicht mit dem Fortsetzungsstand ueberein."
+                )
+            if gespeichert["checkpoint_revision"] != CHECKPOINT_REVISION:
+                raise RuntimeError(
+                    "Checkpoint-Revision stimmt nicht mit dem Fortsetzungsstand ueberein."
+                )
+            if gespeichert["lora_rang"] != LORA_RANG:
+                raise RuntimeError(
+                    "LoRA-Rang stimmt nicht mit dem Fortsetzungsstand ueberein."
+                )
+            if gespeichert["lernrate"] != lernrate:
+                raise RuntimeError(
+                    "Lernrate stimmt nicht mit dem Fortsetzungsstand ueberein."
+                )
+            if gespeichert["klassen_zu_labels"] != KLASSEN_ZU_LABELS:
+                raise RuntimeError(
+                    "Klassen-Zuordnung stimmt nicht mit dem Fortsetzungsstand ueberein."
+                )
+
+            print("Geladener Trainingsstand:", trainingsstandspfad)
+            modell = PeftModel.from_pretrained(
+                modell,
+                alter_standpfad,
+                is_trainable=True,
+            )
+            startepoche = gespeichert["epoche"] + 1
+        else:
+            modell = get_peft_model(modell, lora_config)
+            startepoche = 1
+
+        modell = modell.to(geraet)
+
+        lora_modulnamen = []
+        for name, modul in modell.named_modules():
+            if hasattr(modul, "lora_A"):
+                lora_modulnamen.append(name)
+
+        print(f"Anzahl LoRA Adaptermodule: {len(lora_modulnamen)}")
+        if len(lora_modulnamen) != 24:
             raise RuntimeError(
-                f"Erwartet wurde genau ein Adapter fuer {suffix}, "
-                f"gefunden wurden {len(treffer)}: {treffer}"
+                f"Erwartet wurden 24 LoRA Adaptermodule, gefunden wurden "
+                f"{len(lora_modulnamen)}."
+            )
+        if any("patch_embed.proj" in name for name in lora_modulnamen):
+            raise RuntimeError(
+                "patch_embed.proj darf keinen LoRA Adapter enthalten."
             )
 
-trainierbare_parameter = [
-    (name, parameter)
-    for name, parameter in modell.named_parameters()
-    if parameter.requires_grad
-]
-anzahl_trainierbarer_parameter = sum(
-    parameter.numel() for _, parameter in trainierbare_parameter
-)
+        for block in range(12):
+            for zielmodul in ("qkv", "proj"):
+                suffix = f"blocks.{block}.attn.{zielmodul}"
+                treffer = [
+                    name
+                    for name in lora_modulnamen
+                    if name.endswith(suffix)
+                ]
+                if len(treffer) != 1:
+                    raise RuntimeError(
+                        f"Erwartet wurde genau ein Adapter fuer {suffix}, "
+                        f"gefunden wurden {len(treffer)}: {treffer}"
+                    )
 
-print(f"Anzahl trainierbarer Parameter: {anzahl_trainierbarer_parameter}")
-
-if anzahl_trainierbarer_parameter != erwartete_anzahl_trainierbarer_parameter:
-    raise RuntimeError(
-        "Erwartet wurden "
-        f"{erwartete_anzahl_trainierbarer_parameter} trainierbare Parameter, "
-        f"gefunden wurden {anzahl_trainierbarer_parameter}."
-    )
-
-verlustfunktion = torch.nn.CrossEntropyLoss()
-optimierer = torch.optim.AdamW(
-    [parameter for _, parameter in trainierbare_parameter],
-    lr=LERNRATE,
-)
-
-if ALTER_STAND:
-    optimierer.load_state_dict(
-        gespeichert["optimizer_state_dict"]
-    )
-
-ausgabeordner = (
-    repo_ordner
-    / "models"
-    / "lora"
-    / f"rang_{LORA_RANG}"
-    / f"epoche_{epoche}"
-)
-if ausgabeordner.exists():
-    raise FileExistsError(
-        f"Ausgabeordner existiert bereits; ueberschreiben verhindert: "
-        f"{ausgabeordner}"
-    )
-
-if ALTER_STAND:
-    if "torch_rng_state" in gespeichert:
-        torch.set_rng_state(gespeichert["torch_rng_state"].cpu())
-    if "cuda_rng_state" in gespeichert and torch.cuda.is_available():
-        torch.cuda.set_rng_state(
-            gespeichert["cuda_rng_state"].cpu(),
-            geraete_index,
+        trainierbare_parameter = [
+            (name, parameter)
+            for name, parameter in modell.named_parameters()
+            if parameter.requires_grad
+        ]
+        anzahl_trainierbarer_parameter = sum(
+            parameter.numel()
+            for _, parameter in trainierbare_parameter
         )
 
-modell.train()
-epoche_start = time.perf_counter()
-trainingsverlust_summe = 0.0
-training_richtig = 0
-training_anzahl = 0
-
-for trainings_bilder, trainings_labels in trainings_dataloader:
-    trainings_bilder = trainings_bilder.to(geraet)
-    trainings_labels = trainings_labels.to(geraet)
-
-    optimierer.zero_grad(set_to_none=True)
-    logits = modell(trainings_bilder)
-    verlust = verlustfunktion(logits, trainings_labels)
-    verlust.backward()
-    optimierer.step()
-
-    trainingsverlust_summe += verlust.item() * trainings_labels.size(0)
-    training_richtig += (
-        logits.argmax(dim=1) == trainings_labels
-    ).sum().item()
-    training_anzahl += trainings_labels.size(0)
-
-modell.eval()
-validierungsverlust_summe = 0.0
-validierung_richtig = 0
-validierung_anzahl = 0
-
-with torch.no_grad():
-    for validierungs_bilder, validierungs_labels in validierungs_dataloader:
-        validierungs_bilder = validierungs_bilder.to(geraet)
-        validierungs_labels = validierungs_labels.to(geraet)
-        logits = modell(validierungs_bilder)
-        verlust = verlustfunktion(logits, validierungs_labels)
-        vorhergesagte_labels = logits.argmax(dim=1)
-
-        validierungsverlust_summe += (
-            verlust.item() * validierungs_labels.size(0)
+        print(
+            f"Anzahl trainierbarer Parameter: "
+            f"{anzahl_trainierbarer_parameter}"
         )
-        validierung_richtig += (
-            vorhergesagte_labels == validierungs_labels
-        ).sum().item()
-        validierung_anzahl += validierungs_labels.size(0)
+        if (
+            anzahl_trainierbarer_parameter
+            != erwartete_anzahl_trainierbarer_parameter
+        ):
+            raise RuntimeError(
+                "Erwartet wurden "
+                f"{erwartete_anzahl_trainierbarer_parameter} "
+                f"trainierbare Parameter, gefunden wurden "
+                f"{anzahl_trainierbarer_parameter}."
+            )
 
-laufzeit = time.perf_counter() - epoche_start
-trainings_verlust = trainingsverlust_summe / training_anzahl
-trainingstrefferquote = training_richtig / training_anzahl
-validierungs_verlust = (
-    validierungsverlust_summe / validierung_anzahl
-)
-validierungstrefferquote = (
-    validierung_richtig / validierung_anzahl
-)
+        optimierer = torch.optim.AdamW(
+            [parameter for _, parameter in trainierbare_parameter],
+            lr=lernrate,
+        )
 
-ausgabeordner.mkdir(parents=True, exist_ok=False)
-modell.save_pretrained(ausgabeordner)
+        if ALTER_STAND:
+            optimierer.load_state_dict(
+                gespeichert["optimizer_state_dict"]
+            )
+            if "torch_rng_state" in gespeichert:
+                torch.set_rng_state(gespeichert["torch_rng_state"].cpu())
+            if "cuda_rng_state" in gespeichert and torch.cuda.is_available():
+                torch.cuda.set_rng_state(
+                    gespeichert["cuda_rng_state"].cpu(),
+                    geraete_index,
+                )
 
-zufallszustaende = {
-    "torch_rng_state": torch.get_rng_state(),
-}
-if torch.cuda.is_available():
-    zufallszustaende["cuda_rng_state"] = torch.cuda.get_rng_state(
-        geraete_index
-    )
+        laufordner = laufordner_pro_lernrate[lernrate]
+        laufordner.mkdir(exist_ok=False)
 
-torch.save(
-    {
-        "checkpoint_id": CHECKPOINT_ID,
-        "checkpoint_revision": CHECKPOINT_REVISION,
-        "klassen_zu_labels": KLASSEN_ZU_LABELS,
-        "lora_rang": LORA_RANG,
-        "epoche": epoche,
-        "lernrate": LERNRATE,
-        "optimizer_state_dict": optimierer.state_dict(),
-        "vorverarbeitung": vorverarbeitung_config,
-        "trainingsverlust": trainings_verlust,
-        "trainingstrefferquote": trainingstrefferquote,
-        "training_richtige_vorhersagen": training_richtig,
-        "training_anzahl": training_anzahl,
-        "validierungsverlust": validierungs_verlust,
-        "validierungstrefferquote": validierungstrefferquote,
-        "validierung_richtige_vorhersagen": validierung_richtig,
-        "validierung_anzahl": validierung_anzahl,
-        "laufzeit_sekunden": laufzeit,
-        **zufallszustaende,
-    },
-    ausgabeordner / "trainingsstand.pt",
-)
+        for epoche in range(startepoche, EPOCHEN + 1):
+            epoche_start = time.perf_counter()
+            modell.train()
+            trainingsverlust_summe = 0.0
+            training_richtig = 0
+            training_anzahl = 0
 
-epoche_ergebnis = (
-    f"Epoche: {epoche}\n"
-    f"Trainingsverlust: {trainings_verlust:.6f}\n"
-    f"Trainingsgenauigkeit: {trainingstrefferquote:.2%}\n"
-    f"Trainingsrichtige Vorhersagen: "
-    f"{training_richtig}/{training_anzahl}\n"
-    f"Trainingsbildanzahl: {training_anzahl}\n"
-    f"Validierungsverlust: {validierungs_verlust:.6f}\n"
-    f"Validierungsgenauigkeit: {validierungstrefferquote:.2%}\n"
-    f"Validierungsrichtige Vorhersagen: "
-    f"{validierung_richtig}/{validierung_anzahl}\n"
-    f"Validierungsbildanzahl: {validierung_anzahl}\n"
-    f"Laufzeit: {laufzeit:.2f} s\n"
-)
-(ausgabeordner / "ergebnis.txt").write_text(
-    epoche_ergebnis,
-    encoding="utf-8",
-)
+            for trainings_bilder, trainings_labels in trainings_dataloader:
+                trainings_bilder = trainings_bilder.to(geraet)
+                trainings_labels = trainings_labels.to(geraet)
 
-print(
-    f"Epoche {epoche} | "
-    f"Trainingsverlust: {trainings_verlust:.6f} | "
-    f"Trainingsgenauigkeit: {trainingstrefferquote:.2%} | "
-    f"Trainingsrichtige Vorhersagen: "
-    f"{training_richtig}/{training_anzahl} | "
-    f"Validierungsverlust: {validierungs_verlust:.6f} | "
-    f"Validierungsgenauigkeit: {validierungstrefferquote:.2%} | "
-    f"Validierungsrichtige Vorhersagen: "
-    f"{validierung_richtig}/{validierung_anzahl} | "
-    f"Validierungsbildanzahl: {validierung_anzahl} | "
-    f"Laufzeit: {laufzeit:.2f} s"
-)
-print(f"Adapter und Kopf gespeichert unter: {ausgabeordner}")
+                optimierer.zero_grad(set_to_none=True)
+                logits = modell(trainings_bilder)
+                verlust = verlustfunktion(logits, trainings_labels)
+                verlust.backward()
+                optimierer.step()
+
+                trainingsverlust_summe += (
+                    verlust.item() * trainings_labels.size(0)
+                )
+                training_richtig += (
+                    logits.argmax(dim=1) == trainings_labels
+                ).sum().item()
+                training_anzahl += trainings_labels.size(0)
+
+            modell.eval()
+            validierungsverlust_summe = 0.0
+            validierung_richtig = 0
+            validierung_anzahl = 0
+
+            with torch.no_grad():
+                for validierungs_bilder, validierungs_labels in validierungs_dataloader:
+                    validierungs_bilder = validierungs_bilder.to(geraet)
+                    validierungs_labels = validierungs_labels.to(geraet)
+                    logits = modell(validierungs_bilder)
+                    verlust = verlustfunktion(logits, validierungs_labels)
+                    vorhergesagte_labels = logits.argmax(dim=1)
+
+                    validierungsverlust_summe += (
+                        verlust.item() * validierungs_labels.size(0)
+                    )
+                    validierung_richtig += (
+                        vorhergesagte_labels == validierungs_labels
+                    ).sum().item()
+                    validierung_anzahl += validierungs_labels.size(0)
+
+            laufzeit = time.perf_counter() - epoche_start
+            trainings_verlust = (
+                trainingsverlust_summe / training_anzahl
+            )
+            trainingstrefferquote = (
+                training_richtig / training_anzahl
+            )
+            validierungs_verlust = (
+                validierungsverlust_summe / validierung_anzahl
+            )
+            validierungstrefferquote = (
+                validierung_richtig / validierung_anzahl
+            )
+
+            epoche_ausgabeordner = laufordner / f"epoche_{epoche}"
+            epoche_ausgabeordner.mkdir(exist_ok=False)
+            modell.save_pretrained(epoche_ausgabeordner)
+
+            zufallszustaende = {
+                "torch_rng_state": torch.get_rng_state(),
+            }
+            if torch.cuda.is_available():
+                zufallszustaende["cuda_rng_state"] = (
+                    torch.cuda.get_rng_state(geraete_index)
+                )
+
+            torch.save(
+                {
+                    "checkpoint_id": CHECKPOINT_ID,
+                    "checkpoint_revision": CHECKPOINT_REVISION,
+                    "klassen_zu_labels": KLASSEN_ZU_LABELS,
+                    "lora_rang": LORA_RANG,
+                    "lora_alpha": LORA_ALPHA,
+                    "lora_dropout": LORA_DROPOUT,
+                    "seed": SEED,
+                    "batchgroesse": batchgroesse,
+                    "epoche": epoche,
+                    "lernrate": lernrate,
+                    "optimizer_state_dict": optimierer.state_dict(),
+                    "vorverarbeitung": vorverarbeitung_config,
+                    "trainingsverlust": trainings_verlust,
+                    "trainingstrefferquote": trainingstrefferquote,
+                    "training_richtige_vorhersagen": training_richtig,
+                    "training_anzahl": training_anzahl,
+                    "validierungsverlust": validierungs_verlust,
+                    "validierungstrefferquote": validierungstrefferquote,
+                    "validierung_richtige_vorhersagen": validierung_richtig,
+                    "validierung_anzahl": validierung_anzahl,
+                    "laufzeit_sekunden": laufzeit,
+                    **zufallszustaende,
+                },
+                epoche_ausgabeordner / "trainingsstand.pt",
+            )
+
+            epoche_ergebnis = (
+                f"Epoche: {epoche}\n"
+                f"Lernrate: {lernrate}\n"
+                f"Trainingsverlust: {trainings_verlust:.6f}\n"
+                f"Trainingsgenauigkeit: {trainingstrefferquote:.2%}\n"
+                f"Trainingsrichtige Vorhersagen: "
+                f"{training_richtig}/{training_anzahl}\n"
+                f"Trainingsbildanzahl: {training_anzahl}\n"
+                f"Validierungsverlust: {validierungs_verlust:.6f}\n"
+                f"Validierungsgenauigkeit: {validierungstrefferquote:.2%}\n"
+                f"Validierungsrichtige Vorhersagen: "
+                f"{validierung_richtig}/{validierung_anzahl}\n"
+                f"Validierungsbildanzahl: {validierung_anzahl}\n"
+                f"Laufzeit: {laufzeit:.2f} s\n"
+            )
+            (epoche_ausgabeordner / "ergebnis.txt").write_text(
+                epoche_ergebnis,
+                encoding="utf-8",
+            )
+
+            print(
+                f"Epoche {epoche} | "
+                f"Lernrate: {lernrate:g} | "
+                f"Trainingsverlust: {trainings_verlust:.6f} | "
+                f"Trainingsgenauigkeit: {trainingstrefferquote:.2%} | "
+                f"Trainingsrichtige Vorhersagen: "
+                f"{training_richtig}/{training_anzahl} | "
+                f"Validierungsverlust: {validierungs_verlust:.6f} | "
+                f"Validierungsgenauigkeit: {validierungstrefferquote:.2%} | "
+                f"Validierungsrichtige Vorhersagen: "
+                f"{validierung_richtig}/{validierung_anzahl} | "
+                f"Laufzeit: {laufzeit:.2f} s"
+            )
