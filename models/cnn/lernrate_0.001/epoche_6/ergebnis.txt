@@ -1,0 +1,10 @@
+Epoche: 6
+Lernrate: 0.001
+Trainingsverlust: 0.008710
+Trainingsgenauigkeit: 99.84%
+Trainingsrichtige Vorhersagen: 35657/35713
+Validierungsverlust: 0.098221
+Validierungsgenauigkeit: 97.04%
+Validierungsrichtige Vorhersagen: 6122/6309
+Validierungstrefferquote je Klasse: {'Orange': 1.0, 'Mandarine': 1.0, 'Clementine': 1.0, 'Apfel': 0.9947749196141479, 'Pfirsich': 0.9181692094313454, 'Nektarine': 0.813953488372093, 'Birne': 0.9631036353771025, 'Banane': 0.9757785467128027}
+Laufzeit: 60.06 s

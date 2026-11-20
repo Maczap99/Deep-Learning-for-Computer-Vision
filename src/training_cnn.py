@@ -17,7 +17,6 @@ batchgroesse = 8
 
 EPOCHEN = 10
 LERNRATEN = (0.001,)
-# Zusatzversuch vor dem CNN-Kopf (Ergebnisse unter models/Training/cnn_d)
 # CNN_DROPOUT = 0.05
 ERWARTETE_TRAININGSBILDER = 35713
 ERWARTETE_VALIDIERUNGSBILDER = 6309
@@ -295,7 +294,6 @@ if __name__ == "__main__":
                 trainings_labels = trainings_labels.to(geraet)
 
                 optimierer.zero_grad(set_to_none=True)
-                # Variante aus dem Dropout-Versuch:
                 # merkmale = modell.forward_features(trainings_bilder)
                 # merkmale = modell.forward_head(merkmale, pre_logits=True)
                 # merkmale = torch.nn.functional.dropout(

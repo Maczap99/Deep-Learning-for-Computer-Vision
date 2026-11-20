@@ -1,0 +1,7 @@
+Epoche: 3
+Lernrate: 0.01
+Trainingsverlust: 0.000155
+Trainingsgenauigkeit: 100.00%
+Validierungsverlust: 0.007179
+Validierungsgenauigkeit: 99.76%
+Laufzeit: 247.03 s
