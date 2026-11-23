@@ -3,7 +3,7 @@ from pathlib import Path
 
 import timm
 import torch
-import torch_directml
+from peft import PeftModel
 from PIL import Image
 from timm.data import create_transform, resolve_model_data_config
 from torch.utils.data import DataLoader, Dataset
@@ -13,7 +13,7 @@ repo_ordner = Path(__file__).resolve().parent.parent
 
 CHECKPOINT_ID = "timm/vit_base_patch16_224.augreg_in21k_ft_in1k"
 CHECKPOINT_REVISION = "2ec9fb3d7bb664aac471ac44582c94d18de33780"
-CHECKPOINT_DATEINAME = "linear_probing_20261116_184948_182532.pt"
+batchgroesse = 8
 
 KLASSEN_ZU_LABELS = {
     "Orange": 0,
@@ -25,11 +25,37 @@ KLASSEN_ZU_LABELS = {
     "Birne": 6,
     "Banane": 7,
 }
-LABELS_ZU_KLASSEN = {label: klasse for klasse, label in KLASSEN_ZU_LABELS.items()}
+LABELS_ZU_KLASSEN = {
+    label: klasse for klasse, label in KLASSEN_ZU_LABELS.items()
+}
+
+MODELLPFADE = {
+    "linear_probing": (
+        repo_ordner
+        / "models"
+        / "linear_probing"
+        / "lernrate_0.01"
+        / "epoche_7"
+    ),
+    "lora": (
+        repo_ordner
+        / "models"
+        / "lora"
+        / "rang_16"
+        / "lernrate_0.0001"
+        / "epoche_8"
+    ),
+    "cnn": (
+        repo_ordner
+        / "models"
+        / "cnn"
+        / "lernrate_0.001"
+        / "epoche_8"
+    ),
+}
 
 ERWARTETE_VALIDIERUNGSBILDER = 6309
-ERWARTETE_TREFFER = 6296
-ERWARTETE_FEHLER = 13
+ERWARTETE_TESTBILDER = 13982
 
 
 class BildDataset(Dataset):
@@ -52,222 +78,270 @@ class BildDataset(Dataset):
         return bild_tensor, self.labels[index], str(self.bildpfade[index])
 
 
-validierung_zeilen = (
-    repo_ordner / "configs" / "validierung.txt"
-).read_text(encoding="utf-8").splitlines()
-validierungspfade_pro_klasse = {klasse: [] for klasse in KLASSEN_ZU_LABELS}
-for zeile in validierung_zeilen:
-    klasse = Path(zeile).parent.name
-    if klasse in KLASSEN_ZU_LABELS:
-        bildpfad = repo_ordner / zeile
-        if bildpfad not in validierungspfade_pro_klasse[klasse]:
-            validierungspfade_pro_klasse[klasse].append(bildpfad)
+if __name__ == "__main__":
+    validierung_zeilen = (
+        repo_ordner / "configs" / "validierung.txt"
+    ).read_text(encoding="utf-8").splitlines()
+    validierungspfade_pro_klasse = {
+        klasse: [] for klasse in KLASSEN_ZU_LABELS
+    }
+    for zeile in validierung_zeilen:
+        klasse = Path(zeile).parent.name
+        if klasse in KLASSEN_ZU_LABELS:
+            bildpfad = repo_ordner / zeile
+            if bildpfad not in validierungspfade_pro_klasse[klasse]:
+                validierungspfade_pro_klasse[klasse].append(bildpfad)
 
-fehlende_validierungsklassen = [
-    klasse
-    for klasse, bildpfade in validierungspfade_pro_klasse.items()
-    if not bildpfade
-]
-if fehlende_validierungsklassen:
-    raise ValueError(
-        "Keine Validierungsbilder fuer folgende Klassen gefunden: "
-        f"{fehlende_validierungsklassen}"
+    fehlende_validierungsklassen = [
+        klasse
+        for klasse, bildpfade in validierungspfade_pro_klasse.items()
+        if not bildpfade
+    ]
+    if fehlende_validierungsklassen:
+        raise ValueError(
+            "Keine Validierungsbilder fuer folgende Klassen gefunden: "
+            f"{fehlende_validierungsklassen}"
+        )
+
+    validierung_bildpfade = []
+    validierung_labels = []
+    for bild_index in range(
+        max(map(len, validierungspfade_pro_klasse.values()))
+    ):
+        for klasse, label in KLASSEN_ZU_LABELS.items():
+            if bild_index < len(validierungspfade_pro_klasse[klasse]):
+                validierung_bildpfade.append(
+                    validierungspfade_pro_klasse[klasse][bild_index]
+                )
+                validierung_labels.append(label)
+
+    if len(validierung_bildpfade) != ERWARTETE_VALIDIERUNGSBILDER:
+        raise RuntimeError(
+            f"Erwartet wurden {ERWARTETE_VALIDIERUNGSBILDER} "
+            f"Validierungsbilder, gefunden wurden "
+            f"{len(validierung_bildpfade)}."
+        )
+
+    testordner = (
+        repo_ordner / "Assets" / "Fruits-360-Station-1" / "Test"
     )
-
-validierung_bildpfade = []
-validierung_labels = []
-for bild_index in range(max(map(len, validierungspfade_pro_klasse.values()))):
-    for klasse, label in KLASSEN_ZU_LABELS.items():
-        if bild_index < len(validierungspfade_pro_klasse[klasse]):
-            validierung_bildpfade.append(
-                validierungspfade_pro_klasse[klasse][bild_index]
+    testpfade_pro_klasse = {klasse: [] for klasse in KLASSEN_ZU_LABELS}
+    for klasse in KLASSEN_ZU_LABELS:
+        klassenordner = testordner / klasse
+        if not klassenordner.is_dir():
+            raise FileNotFoundError(
+                f"Klassenordner nicht gefunden: {klassenordner}"
             )
-            validierung_labels.append(label)
+        testpfade_pro_klasse[klasse] = sorted(
+            pfad for pfad in klassenordner.iterdir() if pfad.is_file()
+        )
 
+    test_bildpfade = []
+    test_labels = []
+    for bild_index in range(max(map(len, testpfade_pro_klasse.values()))):
+        for klasse, label in KLASSEN_ZU_LABELS.items():
+            if bild_index < len(testpfade_pro_klasse[klasse]):
+                test_bildpfade.append(testpfade_pro_klasse[klasse][bild_index])
+                test_labels.append(label)
 
-speicherpfad = repo_ordner / "models" / CHECKPOINT_DATEINAME
-if not speicherpfad.is_file():
-    raise FileNotFoundError(f"Checkpoint nicht gefunden: {speicherpfad}")
+    if len(test_bildpfade) != ERWARTETE_TESTBILDER:
+        raise RuntimeError(
+            f"Erwartet wurden {ERWARTETE_TESTBILDER} Testbilder, "
+            f"gefunden wurden {len(test_bildpfade)}."
+        )
 
-gespeichert = torch.load(
-    speicherpfad,
-    map_location="cpu",
-    weights_only=True,
-)
+    if torch.cuda.is_available():
+        geraete_index = next(
+            (
+                index
+                for index in range(torch.cuda.device_count())
+                if any(
+                    gesucht in torch.cuda.get_device_name(index)
+                    for gesucht in ("RX 6700 XT", "GTX 1070")
+                )
+            ),
+            0,
+        )
+        geraet = torch.device(f"cuda:{geraete_index}")
+        geraetename = torch.cuda.get_device_name(
+            geraete_index
+        ).rstrip("\x00")
+    else:
+        geraet = torch.device("cpu")
+        geraetename = "CPU"
+    print(f"Modellgerät: {geraetename}")
 
+    for modellname in MODELLPFADE:
+        speicherpfad = MODELLPFADE[modellname]
+        trainingsstand = speicherpfad / "trainingsstand.pt"
+        if not trainingsstand.is_file():
+            raise FileNotFoundError(
+                f"Checkpoint nicht gefunden: {trainingsstand}"
+            )
+        gespeichert = torch.load(
+            trainingsstand,
+            map_location="cpu",
+            weights_only=True,
+        )
 
-if gespeichert.get("checkpoint_id") != CHECKPOINT_ID:
-    raise RuntimeError(
-        "Checkpoint-ID stimmt nicht mit dem Trainingsstand ueberein: "
-        f"{gespeichert.get('checkpoint_id')!r}"
-    )
-if gespeichert.get("checkpoint_revision") != CHECKPOINT_REVISION:
-    raise RuntimeError(
-        "Checkpoint-Revision stimmt nicht mit dem Trainingsstand ueberein: "
-        f"{gespeichert.get('checkpoint_revision')!r}"
-    )
-if gespeichert.get("klassen_zu_labels") != KLASSEN_ZU_LABELS:
-    raise RuntimeError(
-        "Klassen-Zuordnung im Checkpoint stimmt nicht mit dem Auswertungscode ueberein."
-    )
+        if modellname != "cnn":
+            if gespeichert.get("checkpoint_id") != CHECKPOINT_ID:
+                raise RuntimeError("Checkpoint-ID stimmt nicht ueberein.")
+            if gespeichert.get("checkpoint_revision") != CHECKPOINT_REVISION:
+                raise RuntimeError("Checkpoint-Revision stimmt nicht ueberein.")
+        if gespeichert.get("klassen_zu_labels") != KLASSEN_ZU_LABELS:
+            raise RuntimeError(
+                "Klassen-Zuordnung im Checkpoint stimmt nicht mit dem "
+                "Auswertungscode ueberein."
+            )
 
+        if modellname == "cnn":
+            modell = timm.create_model(
+                "resnet18.tv_in1k",
+                pretrained=True,
+            )
+            modell.fc = torch.nn.Linear(
+                modell.fc.in_features,
+                len(KLASSEN_ZU_LABELS),
+            )
+            modell.load_state_dict(gespeichert["modell_state_dict"])
+        else:
+            modell = timm.create_model(
+                "vit_base_patch16_224.augreg_in21k_ft_in1k",
+                pretrained=True,
+                pretrained_cfg_overlay={
+                    "hf_hub_id": f"{CHECKPOINT_ID}@{CHECKPOINT_REVISION}",
+                },
+            )
+            modell.reset_classifier(
+                num_classes=len(KLASSEN_ZU_LABELS)
+            )
 
-modell = timm.create_model(
-    "vit_base_patch16_224.augreg_in21k_ft_in1k",
-    pretrained=True,
-    pretrained_cfg_overlay={
-        "hf_hub_id": f"{CHECKPOINT_ID}@{CHECKPOINT_REVISION}",
-    },
-)
-
-for parameter in modell.parameters():
-    parameter.requires_grad = False
-
-modell.reset_classifier(num_classes=len(KLASSEN_ZU_LABELS))
-geraete_index = next(
-    index
-    for index in range(torch_directml.device_count())
-    if "RX 6700 XT" in torch_directml.device_name(index)
-)
-geraet = torch_directml.device(geraete_index)
-modell = modell.to(geraet)
-print('Modellgerät:', torch_directml.device_name(geraete_index).rstrip('\x00'), next(modell.parameters()).device)
-head = modell.get_classifier()
-if not isinstance(head, torch.nn.Linear):
-    raise TypeError(f"Erwartet wurde ein linearer Klassifikationskopf, erhalten: {type(head)}")
-if (head.in_features, head.out_features, head.bias is not None) != (768, 8, True):
-    raise RuntimeError(
-        "Unerwartete Kopfkonfiguration: "
-        f"in_features={head.in_features}, out_features={head.out_features}, "
-        f"bias={head.bias is not None}"
-    )
-
-head.load_state_dict(gespeichert["head_state_dict"])
-modell.eval()
-
-
-vorverarbeitung_config = resolve_model_data_config(modell)
-if vorverarbeitung_config != gespeichert["vorverarbeitung"]:
-    raise RuntimeError("Vorverarbeitung stimmt nicht mit dem Trainingsstand überein.")
-vorverarbeitung = create_transform(**vorverarbeitung_config, is_training=False)
-
-validierungs_dataset = BildDataset(
-    validierung_bildpfade,
-    validierung_labels,
-    vorverarbeitung,
-)
-batchgroesse = 8
-validierungs_dataloader = DataLoader(
-    validierungs_dataset,
-    batch_size=batchgroesse,
-    shuffle=False,
-)
-
-
-anzahl_klassen = len(KLASSEN_ZU_LABELS)
-bildzahl_pro_klasse = [0] * anzahl_klassen
-richtige_vorhersagen_pro_klasse = [0] * anzahl_klassen
-verwechslungsmatrix = [[0] * anzahl_klassen for _ in range(anzahl_klassen)]
-fehlerliste = []
-
-with torch.no_grad():
-    for batch, batch_labels, batch_pfade in validierungs_dataloader:
-        batch = batch.to(geraet)
-        batch_labels = batch_labels.to(geraet)
-        logits = modell(batch)
-        vorhergesagte_labels = logits.argmax(dim=1)
-
-        for tatsaechliches_label, vorhergesagtes_label, bildpfad in zip(
-            batch_labels.cpu().tolist(),
-            vorhergesagte_labels.cpu().tolist(),
-            batch_pfade,
-        ):
-            bildzahl_pro_klasse[tatsaechliches_label] += 1
-            verwechslungsmatrix[tatsaechliches_label][vorhergesagtes_label] += 1
-            if tatsaechliches_label == vorhergesagtes_label:
-                richtige_vorhersagen_pro_klasse[tatsaechliches_label] += 1
+            if modellname == "linear_probing":
+                head = modell.get_classifier()
+                head.load_state_dict(gespeichert["head_state_dict"])
             else:
-                fehlerliste.append(
-                    {
-                        "bildpfad": Path(bildpfad).relative_to(repo_ordner).as_posix(),
-                        "tatsaechlich": LABELS_ZU_KLASSEN[tatsaechliches_label],
-                        "vorhergesagt": LABELS_ZU_KLASSEN[vorhergesagtes_label],
-                    }
+                modell = PeftModel.from_pretrained(
+                    modell,
+                    speicherpfad,
+                    is_trainable=False,
                 )
 
-klassen_statistik = [
-    {
-        "klasse": LABELS_ZU_KLASSEN[label],
-        "bildzahl": bildzahl_pro_klasse[label],
-        "richtige_vorhersagen": richtige_vorhersagen_pro_klasse[label],
-        "trefferquote": (
-            richtige_vorhersagen_pro_klasse[label] / bildzahl_pro_klasse[label]
-        ),
-    }
-    for label in range(anzahl_klassen)
-]
-validierung_anzahl = sum(bildzahl_pro_klasse)
-validierung_richtig = sum(richtige_vorhersagen_pro_klasse)
+        vorverarbeitung_config = resolve_model_data_config(modell)
+        if vorverarbeitung_config != gespeichert["vorverarbeitung"]:
+            raise RuntimeError(
+                f"Vorverarbeitung fuer {modellname} stimmt nicht ueberein."
+            )
+        vorverarbeitung = create_transform(
+            **vorverarbeitung_config,
+            is_training=False,
+        )
+        modell = modell.to(geraet)
+        modell.eval()
 
-print("Checkpoint:", speicherpfad)
-print("Validierungsbilder:", validierung_anzahl)
-print("Richtige Vorhersagen:", validierung_richtig)
-print("Fehler:", len(fehlerliste))
-print(f"Trefferquote: {validierung_richtig / validierung_anzahl:.2%}")
-print("\nTrefferquote pro Klasse:")
-for statistik in klassen_statistik:
-    print(f'{statistik['klasse']}: {statistik['richtige_vorhersagen']}/{statistik['bildzahl']} ({statistik['trefferquote']:.2%})')
+        for datenname, bildpfade, labels in (
+            ("validierung", validierung_bildpfade, validierung_labels),
+            ("test", test_bildpfade, test_labels),
+        ):
+            dataset = BildDataset(bildpfade, labels, vorverarbeitung)
+            dataloader = DataLoader(
+                dataset,
+                batch_size=gespeichert.get("batchgroesse", batchgroesse),
+                shuffle=False,
+            )
 
-print("\nFehlerliste (Zeilen=Original, Spalten=Vorhergesagt):")
-print(" " * 14 + " ".join(f"{klasse:>12}" for klasse in LABELS_ZU_KLASSEN.values()))
-for label, zeile in enumerate(verwechslungsmatrix):
-    print(f'{LABELS_ZU_KLASSEN[label]:>14} ' + ' '.join((f'{wert:>12}' for wert in zeile)))
+            anzahl_klassen = len(KLASSEN_ZU_LABELS)
+            bildzahl_pro_klasse = [0] * anzahl_klassen
+            richtige_vorhersagen_pro_klasse = [0] * anzahl_klassen
+            verwechslungsmatrix = [
+                [0] * anzahl_klassen for _ in range(anzahl_klassen)
+            ]
+            fehlerliste = []
 
-print("\nFalsch erkannte Bilder:")
-for fehler in fehlerliste:
-    print(f'Original: {fehler['tatsaechlich']} | Vorhergesagt: {fehler['vorhergesagt']} | Bild: {fehler['bildpfad']}')
+            with torch.no_grad():
+                for batch, batch_labels, batch_pfade in dataloader:
+                    batch = batch.to(geraet)
+                    batch_labels = batch_labels.to(geraet)
+                    logits = modell(batch)
+                    vorhergesagte_labels = logits.argmax(dim=1)
 
+                    for tatsaechliches_label, vorhergesagtes_label, bildpfad in zip(
+                        batch_labels.cpu().tolist(),
+                        vorhergesagte_labels.cpu().tolist(),
+                        batch_pfade,
+                    ):
+                        bildzahl_pro_klasse[tatsaechliches_label] += 1
+                        verwechslungsmatrix[tatsaechliches_label][
+                            vorhergesagtes_label
+                        ] += 1
+                        if tatsaechliches_label == vorhergesagtes_label:
+                            richtige_vorhersagen_pro_klasse[
+                                tatsaechliches_label
+                            ] += 1
+                        else:
+                            fehlerliste.append(
+                                {
+                                    "bildpfad": Path(bildpfad)
+                                    .relative_to(repo_ordner)
+                                    .as_posix(),
+                                    "tatsaechlich": LABELS_ZU_KLASSEN[
+                                        tatsaechliches_label
+                                    ],
+                                    "vorhergesagt": LABELS_ZU_KLASSEN[
+                                        vorhergesagtes_label
+                                    ],
+                                }
+                            )
 
-if (
-    validierung_anzahl != ERWARTETE_VALIDIERUNGSBILDER
-    or validierung_richtig != ERWARTETE_TREFFER
-    or len(fehlerliste) != ERWARTETE_FEHLER
-):
-    raise RuntimeError(
-        "Wiederholbarkeit fehlgeschlagen: erwartet wurden "
-        f"{ERWARTETE_TREFFER} Treffer und {ERWARTETE_FEHLER} Fehler bei "
-        f"{ERWARTETE_VALIDIERUNGSBILDER} Bildern, erhalten wurden "
-        f"{validierung_richtig} Treffer und {len(fehlerliste)} Fehler bei "
-        f"{validierung_anzahl} Bildern."
-    )
+            daten_anzahl = sum(bildzahl_pro_klasse)
+            richtig = sum(richtige_vorhersagen_pro_klasse)
 
+            print(f"\n{modellname} - {datenname}")
+            print("Checkpoint:", speicherpfad)
+            print("Bilder:", daten_anzahl)
+            print("Richtige Vorhersagen:", richtig)
+            print("Fehler:", len(fehlerliste))
+            print(f"Trefferquote: {richtig / daten_anzahl:.2%}")
 
-ergebnisordner = repo_ordner / "results"
-ergebnisordner.mkdir(parents=True, exist_ok=True)
-ergebnisdatei = ergebnisordner / f"auswertung_{speicherpfad.stem}.txt"
+            ergebnisordner = (
+                repo_ordner / "results" / datenname / modellname
+            )
+            ergebnisordner.mkdir(parents=True, exist_ok=True)
 
-with ergebnisdatei.open("w", encoding="utf-8") as datei:
-    print("Checkpoint:", speicherpfad.name, file=datei)
-    print("Validierungsbilder:", validierung_anzahl, file=datei)
-    print("Richtige Vorhersagen:", validierung_richtig, file=datei)
-    print("Fehler:", len(fehlerliste), file=datei)
-    print(f"Trefferquote: {validierung_richtig / validierung_anzahl:.2%}", file=datei)
+            fehlerdatei = ergebnisordner / "fehlerbilder.csv"
+            with fehlerdatei.open(
+                "w",
+                newline="",
+                encoding="utf-8",
+            ) as datei:
+                writer = csv.writer(datei)
+                writer.writerow(
+                    ["bildpfad", "tatsaechlich", "vorhergesagt"]
+                )
+                for fehler in fehlerliste:
+                    writer.writerow(
+                        [
+                            fehler["bildpfad"],
+                            fehler["tatsaechlich"],
+                            fehler["vorhergesagt"],
+                        ]
+                    )
 
-    print("\nTrefferquote pro Klasse:", file=datei)
-    for statistik in klassen_statistik:
-        print(f'{statistik['klasse']}: {statistik['richtige_vorhersagen']}/{statistik['bildzahl']} ({statistik['trefferquote']:.2%})', file=datei)
+            matrixdatei = ergebnisordner / "verwechslungsmatrix.csv"
+            with matrixdatei.open(
+                "w",
+                newline="",
+                encoding="utf-8",
+            ) as datei:
+                writer = csv.writer(datei)
+                writer.writerow(
+                    ["Original / Vorhergesagt", *LABELS_ZU_KLASSEN.values()]
+                )
+                for label, zeile in enumerate(verwechslungsmatrix):
+                    writer.writerow(
+                        [LABELS_ZU_KLASSEN[label], *zeile]
+                    )
 
-    print("\nFalsch erkannte Bilder:", file=datei)
-    for fehler in fehlerliste:
-        print(f'Original: {fehler['tatsaechlich']} | Vorhergesagt: {fehler['vorhergesagt']} | Bild: {fehler['bildpfad']}', file=datei)
-
-matrix_csv = ergebnisordner / f"auswertung_{speicherpfad.stem}_fehlerliste.csv"
-with matrix_csv.open("w", newline="", encoding="utf-8") as datei:
-    writer = csv.writer(datei)
-    writer.writerow(["Original / Vorhergesagt", *LABELS_ZU_KLASSEN.values()])
-    for label, zeile in enumerate(verwechslungsmatrix):
-        writer.writerow([LABELS_ZU_KLASSEN[label], *zeile])
-
-print("\nErgebnisse gespeichert:")
-print(ergebnisdatei)
-print(matrix_csv)
+            print("Ergebnisse gespeichert:")
+            print(fehlerdatei)
+            print(matrixdatei)
